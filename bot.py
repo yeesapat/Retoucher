@@ -42,7 +42,7 @@ def add_watermark(image, text="Living soon", color=(0, 255, 0, 256), font_size=2
     draw.text(position, text, fill=color, font=font)
     return image.convert("RGB")
 
-# --- ฟังก์ชัน upload Google Drive ---
+# --- upload Google Drive ---
 def upload_to_google_drive(image_data, filename='processed_image.png', folder_id=None):
     creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
     try:
