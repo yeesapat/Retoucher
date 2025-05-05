@@ -11,7 +11,7 @@ load_dotenv()
 
 # --- ตั้งค่า Discord Bot ---
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID = 1366630727298318379 # ใส่ ID ของ Channel ที่ต้องการให้ Bot ทำงาน
+CHANNEL_ID = os.getenv("CHANNEL_ID") # ใส่ ID ของ Channel ที่ต้องการให้ Bot ทำงาน
 
 # --- ตั้งค่า Google Drive API ---
 CREDENTIALS_FILE = '/Users/yeesmac/Downloads/Cred Retoucher JSON.json'  # เปลี่ยนเป็น Path ของไฟล์ JSON
