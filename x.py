@@ -6,99 +6,42 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
 import io
 import os
-import cv2
-import numpy as np
 from dotenv import load_dotenv
 
 load_dotenv()
 
-
 # --- ตั้งค่า Discord Bot ---
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID")
+CHANNEL_ID = 1366630727298318379
 
 # --- ตั้งค่า Google Drive API ---
 CREDENTIALS_FILE = '/Users/yeesmac/Downloads/Cred Retoucher JSON.json'
 SCOPES = ['https://www.googleapis.com/auth/drive.file']
-UPLOAD_FOLDER_ID = None
+UPLOAD_FOLDER_ID = None  # Optional: Set to your base folder ID
 
 # --- Retouch ---
-def pil_to_cv2(image):
-    return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-
-def cv2_to_pil(image):
-    return Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-
-def apply_color_tone_cv2(image, tone):
-    if tone == "warm":
-        image[:, :, 2] = cv2.add(image[:, :, 2], 30)
-    elif tone == "cool":
-        image[:, :, 0] = cv2.add(image[:, :, 0], 30)
-    elif tone == "vintage":
-        image = cv2.applyColorMap(image, cv2.COLORMAP_AUTUMN)
+def retouch_image(image):
+    enhancer = ImageEnhance.Brightness(image)
+    image = enhancer.enhance(1.15)
+    enhancer = ImageEnhance.Contrast(image)
+    image = enhancer.enhance(1.15)
     return image
-
-def smooth_image_cv2(image):
-    return cv2.GaussianBlur(image, (5, 5), 0)
-
-def denoise_image_cv2(image):
-    return cv2.fastNlMeansDenoisingColored(image, None, 10, 10, 7, 21)
-
-def automatic_color_correction(image):
-    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-    cl = clahe.apply(l)
-    limg = cv2.merge((cl,a,b))
-    return cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
 
 # --- watermark ---
-def add_watermark_cv2(image, watermark_path, position="bottom-right"):
-    watermark = cv2.imread(watermark_path, cv2.IMREAD_UNCHANGED)
-    (wH, wW) = watermark.shape[:2]
-    (h, w) = image.shape[:2]
-    if position == "top-left":
-        x, y = 10, 10
-    elif position == "top-right":
-        x, y = w - wW - 10, 10
-    elif position == "bottom-left":
-        x, y = 10, h - wH - 10
-    else:
-        x, y = w - wW - 10, h - wH - 10
+def add_watermark(image, text="Living soon", color=(0, 255, 0, 255), font_size=20):
+    draw = ImageDraw.Draw(image.convert("RGBA"))
+    width, height = image.size
+    try:
+        font = ImageFont.truetype("arial.ttf", font_size)
+    except IOError:
+        font = ImageFont.load_default()
 
-    if watermark.shape[2] == 4:
-        alpha_s = watermark[:, :, 3] / 255.0
-        alpha_l = 1.0 - alpha_s
-        for c in range(0, 3):
-            image[y:y+wH, x:x+wW, c] = (alpha_s * watermark[:, :, c] +
-                                       alpha_l * image[y:y+wH, x:x+wW, c])
-    else:
-        image[y:y+wH, x:x+wW] = watermark
-    return image
-
-def advanced_retouch(image_pil, keywords, watermark_path):
-    img_cv2 = pil_to_cv2(image_pil)
-
-    if "correct" in keywords:
-        img_cv2 = automatic_color_correction(img_cv2)
-    if "smooth" in keywords:
-        img_cv2 = smooth_image_cv2(img_cv2)
-    if "denoise" in keywords:
-        img_cv2 = denoise_image_cv2(img_cv2)
-
-    for tone in ["warm", "cool", "vintage"]:
-        if tone in keywords:
-            img_cv2 = apply_color_tone_cv2(img_cv2, tone)
-            break
-
-    positions = ["top-left", "top-right", "bottom-left", "bottom-right"]
-    for pos in positions:
-        if pos in keywords:
-            img_cv2 = add_watermark_cv2(img_cv2, watermark_path, pos)
-            break
-
-    return cv2_to_pil(img_cv2)
-
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_width = bbox[2] - bbox[0]
+    text_height = bbox[3] - bbox[1]
+    position = (width - text_width - 20, height - text_height - 20)
+    draw.text(position, text, fill=color, font=font)
+    return image.convert("RGB")
 
 # --- upload Google Drive ---
 def create_drive_folder(folder_name, parent_id=None):
@@ -151,14 +94,15 @@ def upload_to_google_drive(image_data, filename='processed_image.png', folder_id
         print(f'An error occurred during upload: {error}')
         return False
 
-
+# --- Discord Bot ---
 class ImageProcessingClient(discord.Client):
     async def on_ready(self):
-        print(f'Logged in as {self.user}')
+        print(f'✅ Logged in as {self.user}')
 
     async def on_message(self, message):
         if message.author == self.user:
             return
+
         if message.channel.id == CHANNEL_ID and message.attachments:
             folder_name = f"Processed_{message.id}"
             folder_id, folder_link = create_drive_folder(folder_name, parent_id=UPLOAD_FOLDER_ID)
@@ -167,22 +111,17 @@ class ImageProcessingClient(discord.Client):
                 await message.reply('❌ ไม่สามารถสร้างโฟลเดอร์บน Google Drive ได้')
                 return
 
-            keywords = message.content.lower().split()
             success_count = 0
             for attachment in message.attachments:
                 if attachment.content_type and attachment.content_type.startswith('image/'):
                     try:
                         image_bytes = await attachment.read()
                         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-
-                        retouched_image = advanced_retouch(
-                            image,
-                            keywords,
-                            watermark_path='watermark.png'
-                        )
+                        retouched_image = retouch_image(image)
+                        watermarked_image = add_watermark(retouched_image)
 
                         output_buffer = io.BytesIO()
-                        retouched_image.save(output_buffer, format='PNG')
+                        watermarked_image.save(output_buffer, format='PNG')
                         output_buffer.seek(0)
 
                         output_filename = f'processed_{attachment.filename.rsplit(".", 1)[0]}.png'
@@ -202,6 +141,13 @@ class ImageProcessingClient(discord.Client):
                         await message.reply(f'⚠️ เกิดข้อผิดพลาดกับไฟล์ {attachment.filename}: {e}')
 
             if success_count > 0:
-                await message.reply(f'ประมวลผลและอัปโหลด {success_count} ภาพเรียบร้อยแล้ว: {folder_link}')
+                await message.reply(f'✅ ประมวลผลและอัปโหลด {success_count} ภาพเรียบร้อยแล้ว: {folder_link}')
             else:
-                await message.reply('เกิดข้อผิดพลาดในการประมวลผลภาพ')
+                await message.reply('❌ ไม่สามารถอัปโหลดภาพได้')
+
+
+intents = discord.Intents.default()
+intents.message_content = True
+client = ImageProcessingClient(intents=intents)
+client.run(DISCORD_TOKEN)
+
