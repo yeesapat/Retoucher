@@ -15,7 +15,7 @@ DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = 1366630727298318379
 
 # --- ตั้งค่า Google Drive API ---
-CREDENTIALS_FILE = '/Users/yeesmac/Downloads/Cred Retoucher JSON.json'
+CREDENTIALS_FILE = '/Users/yeesmac/Downloads/CredRetoucher.json'
 SCOPES = ['https://www.googleapis.com/auth/drive.file']
 UPLOAD_FOLDER_ID = None  # Optional: Set to your base folder ID
 
