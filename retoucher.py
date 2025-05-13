@@ -18,14 +18,12 @@ import sys
 
 load_dotenv()
 
-# --- Bot Configuration ---
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))  # Replace with your channel ID
-CREDENTIALS_FILE = os.getenv("CREDENTIALS_FILE")  # Path to your Google credentials JSON
-UPLOAD_FOLDER_ID = os.getenv("GOOGLE_FOLDER_ID")  # Optional: Set to your base folder ID
-WATERMARK_PATH = os.getenv("WATERMARK_PATH", "Water_Mark.png")  # Path to your watermark file
+CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
+CREDENTIALS_FILE = os.getenv("CREDENTIALS_FILE") 
+UPLOAD_FOLDER_ID = os.getenv("GOOGLE_FOLDER_ID")
+WATERMARK_PATH = os.getenv("WATERMARK_PATH", "Water_Mark.png")
 
-# Check if credentials file exists
 if CREDENTIALS_FILE is None:
     print("WARNING: GOOGLE_CREDENTIALS_FILE environment variable is not set.")
     print("Google Drive upload functionality will be disabled.")
@@ -33,50 +31,126 @@ elif not os.path.exists(CREDENTIALS_FILE):
     print(f"WARNING: Google credentials file not found at {CREDENTIALS_FILE}")
     print("Google Drive upload functionality will be disabled.")
 
-# --- Google Drive API Configuration ---
 SCOPES = ['https://www.googleapis.com/auth/drive.file']
 
-# --- Global Storage for Processing Sessions ---
 active_sessions = {}
-
 class ImageQCSession:
     def __init__(self, message_id, supply_id, original_images, user_id):
         self.message_id = message_id
         self.supply_id = supply_id
-        self.original_images = original_images  # List of original image data
-        self.processed_images = []  # Will store processed images
+        self.original_images = original_images 
+        self.processed_images = [] 
+        self.processed_images_no_watermark = []
         self.current_index = 0
         self.user_id = user_id
-        self.qc_status = []  # Will be populated with True/False/None for each image (Pass/Not Pass/Pending)
+        self.qc_status = [] 
         self.folder_id = None
         self.folder_link = None
+        self.feedback = {} 
+        self.passed_images = [] 
     
     def is_complete(self):
-        # Check if all images have been reviewed
         return all(status is not None for status in self.qc_status)
     
     def all_passed(self):
-        # Check if all images passed QC
         return all(status is True for status in self.qc_status)
 
 # --- Image Processing Functions ---
-def retouch_image(pil_image):
+def apply_gray_world(image):
+    """Apply Gray World color correction algorithm to an image"""
     # Convert PIL image to OpenCV format
-    cv_image = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+    cv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+    
+    # Split the image into its BGR components
+    b, g, r = cv2.split(cv_image)
+    
+    # Calculate the average of each channel
+    r_avg = np.mean(r)
+    g_avg = np.mean(g)
+    b_avg = np.mean(b)
+    
+    # Calculate the average gray value
+    avg = (r_avg + g_avg + b_avg) / 3
+    
+    # Calculate the scaling factors
+    r_scale = avg / r_avg if r_avg > 0 else 1
+    g_scale = avg / g_avg if g_avg > 0 else 1
+    b_scale = avg / b_avg if b_avg > 0 else 1
+    
+    # Apply the scaling factors
+    r = cv2.convertScaleAbs(r, alpha=r_scale)
+    g = cv2.convertScaleAbs(g, alpha=g_scale)
+    b = cv2.convertScaleAbs(b, alpha=b_scale)
+    
+    # Merge the channels back
+    balanced_image = cv2.merge([b, g, r])
+    
+    # Convert back to PIL image
+    return Image.fromarray(cv2.cvtColor(balanced_image, cv2.COLOR_BGR2RGB))
 
-    # Adjust brightness and contrast
-    alpha = 1.375 # Contrast control (1.0-3.0)
-    beta = 9     # Brightness control (0-100)
+def component_stretching(image):
+    """Apply contrast stretching to each color channel"""
+    # Convert PIL image to OpenCV format
+    cv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+    
+    # Split the image into its BGR components
+    b, g, r = cv2.split(cv_image)
+    
+    # Apply histogram stretching to each channel
+    channels = []
+    for channel in [b, g, r]:
+        min_val = np.min(channel)
+        max_val = np.max(channel)
+        
+        # Avoid division by zero
+        if max_val > min_val:
+            stretched = np.uint8(255 * ((channel - min_val) / (max_val - min_val)))
+        else:
+            stretched = channel
+            
+        channels.append(stretched)
+        
+    # Merge the channels back
+    stretched_image = cv2.merge([channels[0], channels[1], channels[2]])
+    
+    # Convert back to PIL image
+    return Image.fromarray(cv2.cvtColor(stretched_image, cv2.COLOR_BGR2RGB))
+
+def retouch_image(pil_image):
+    # Apply Gray World assumption for color balance
+    balanced_image = apply_gray_world(pil_image)
+
+    # Convert to OpenCV format
+    cv_image = cv2.cvtColor(np.array(balanced_image), cv2.COLOR_RGB2BGR)
+    gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+    brightness = np.mean(gray)
+
+    # Dynamically adjust contrast/brightness based on brightness score
+    if brightness < 60:
+        alpha = 1.4  # higher contrast
+        beta = 30    # brighten
+    elif brightness > 180:
+        alpha = 0.9  # reduce contrast a bit
+        beta = -20   # darken
+    else:
+        alpha = 1.2
+        beta = 10
+
     cv_image = cv2.convertScaleAbs(cv_image, alpha=alpha, beta=beta)
 
-    # Apply smoothing (Gaussian Blur)
-    smoothed = cv2.GaussianBlur(cv_image, (3, 3), 0)
+    # Back to PIL
+    processed_image = Image.fromarray(cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB))
 
-    # Convert back to PIL image
-    processed_image = Image.fromarray(cv2.cvtColor(smoothed, cv2.COLOR_BGR2RGB))
+    # Sharpen
+    enhancer = ImageEnhance.Sharpness(processed_image)
+    processed_image = enhancer.enhance(1.3)
+
+    # Component stretch
+    processed_image = component_stretching(processed_image)
+
     return processed_image
 
-def add_watermark(image, watermark_path=WATERMARK_PATH, position="top-right", margin=5, opacity=0.2):
+def add_watermark(image, watermark_path=WATERMARK_PATH, position="top-right", margin=5, opacity=0.8):
     try:
         # Check if watermark file exists
         if not os.path.exists(watermark_path):
@@ -88,14 +162,17 @@ def add_watermark(image, watermark_path=WATERMARK_PATH, position="top-right", ma
         image = image.convert("RGBA")
         img_w, img_h = image.size
         wm_w, wm_h = watermark.size
-        scale = img_w / 3755
-        watermark = watermark.resize((int(scale * img_w), int(scale * img_h)))
+        fixed_wm_width = 400
+        aspect_ratio = watermark.height / watermark.width
+        wm_w = fixed_wm_width
+        wm_h = int(fixed_wm_width * aspect_ratio)
+        watermark = watermark.resize((wm_w, wm_h))
+
         wm_w, wm_h = watermark.size
         alpha = watermark.split()[3]
         alpha = alpha.point(lambda p: int(p * opacity))
         watermark.putalpha(alpha)
         
-
         # Position watermark
         if position == "top-right":
             x = img_w - wm_w - margin
@@ -223,8 +300,30 @@ class QCButtons(ui.View):
         # Mark current image as not passed
         self.session.qc_status[self.session.current_index] = False
         
+        # Ask for feedback
+        feedback_modal = FeedbackModal(self.session)
+        await interaction.response.send_modal(feedback_modal)
+        
+        # This is now handled in the modal's on_submit
+    
+    @ui.button(label="✅ Pass QC", style=ButtonStyle.success)
+    async def pass_button(self, interaction: discord.Interaction, button: ui.Button):
+        # Mark current image as passed
+        self.session.qc_status[self.session.current_index] = True
+        
+        # Add to passed images list
+        if self.session.current_index not in self.session.passed_images:
+            self.session.passed_images.append(self.session.current_index)
+        
+        # Format the passed images message
+        passed_nums = [str(i+1) for i in self.session.passed_images]
+        if len(passed_nums) <= 2:
+            passed_str = " and ".join(passed_nums)
+        else:
+            passed_str = ", ".join(passed_nums[:-1]) + ", and " + passed_nums[-1]
+        
         await interaction.response.send_message(
-            f"Image {self.session.current_index + 1} marked as NOT PASSED.", 
+            f"Image{' ' if len(passed_nums) == 1 else 's '}{passed_str} marked as PASSED.", 
             ephemeral=False
         )
         
@@ -236,19 +335,97 @@ class QCButtons(ui.View):
             # Check if all images have been reviewed
             if self.session.is_complete():
                 await finalize_qc_process(interaction, self.session)
+
+class RetouchAgainButton(ui.View):
+    def __init__(self, session, image_index):
+        super().__init__(timeout=None)
+        self.session = session
+        self.image_index = image_index
     
-    @ui.button(label="✅ Pass QC", style=ButtonStyle.success)
-    async def pass_button(self, interaction: discord.Interaction, button: ui.Button):
-        # Mark current image as passed
-        self.session.qc_status[self.session.current_index] = True
+    @ui.button(label="🔄 Retouch Again", style=ButtonStyle.primary)
+    async def retouch_button(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.send_message(f"Retouching image {self.image_index + 1} again...", ephemeral=False)
+        
+        # Get the original image
+        original_image = self.session.original_images[self.image_index]
+        
+        # Apply more aggressive retouching
+        # This time we'll apply a stronger adjustment
+        try:
+            cv_image = cv2.cvtColor(np.array(original_image), cv2.COLOR_RGB2BGR)
+            
+            # Apply stronger adjustments
+            alpha = 1.3  # Higher contrast
+            beta = 15    # Higher brightness
+            cv_image = cv2.convertScaleAbs(cv_image, alpha=alpha, beta=beta)
+            
+            # Apply additional noise reduction
+            cv_image = cv2.fastNlMeansDenoisingColored(cv_image, None, 10, 10, 7, 21)
+            
+            # Convert back to PIL
+            retouched = Image.fromarray(cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB))
+            
+            # Apply stronger sharpening
+            enhancer = ImageEnhance.Sharpness(retouched)
+            retouched = enhancer.enhance(2.0)
+            
+            # Apply component stretching
+            retouched = component_stretching(retouched)
+            
+            # Save the retouched image without watermark
+            self.session.processed_images_no_watermark[self.image_index] = retouched
+            
+            # Apply watermark
+            watermarked = add_watermark(retouched)
+            
+            # Replace the processed image
+            self.session.processed_images[self.image_index] = watermarked
+            
+            # Reset QC status for this image
+            self.session.qc_status[self.image_index] = None
+            
+            # If this image was in passed_images, remove it
+            if self.image_index in self.session.passed_images:
+                self.session.passed_images.remove(self.image_index)
+            
+            # Set current index to this image
+            self.session.current_index = self.image_index
+            
+            # Update the QC message
+            await update_qc_message(interaction, self.session)
+            
+        except Exception as e:
+            await interaction.channel.send(f"❌ Error retouching image: {str(e)}")
+
+class FeedbackModal(ui.Modal, title="Image Feedback"):
+    feedback = ui.TextInput(
+        label="What needs improvement?",
+        placeholder="Describe what needs to be fixed in this image...",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=500
+    )
+    
+    def __init__(self, session):
+        super().__init__()
+        self.session = session
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        # Save the feedback
+        current_index = self.session.current_index
+        self.session.feedback[current_index] = self.feedback.value
+        
+        # Mark current image as not passed
+        self.session.qc_status[current_index] = False
         
         await interaction.response.send_message(
-            f"Image {self.session.current_index + 1} marked as PASSED.", 
-            ephemeral=False
+            f"Image {current_index + 1} marked as NOT PASSED.\nFeedback: {self.feedback.value if self.feedback.value else 'None provided'}", 
+            ephemeral=False,
+            view=RetouchAgainButton(self.session, current_index)
         )
         
         # Move to next image if available
-        if self.session.current_index < len(self.session.processed_images) - 1:
+        if current_index < len(self.session.processed_images) - 1:
             self.session.current_index += 1
             await update_qc_message(interaction, self.session)
         else:
@@ -301,35 +478,50 @@ async def finalize_qc_process(interaction, session):
     failed_count = sum(1 for status in session.qc_status if status is False)
     
     # Upload passed images to Google Drive
-    if session.all_passed():
+    if passed_count > 0:
         # Upload all images that passed QC
-        for i, (img, status) in enumerate(zip(session.processed_images, session.qc_status)):
+        for i, (img, img_no_watermark, status) in enumerate(zip(session.processed_images, session.processed_images_no_watermark, session.qc_status)):
             if status:  # True means passed
-                # Convert to bytes
-                img_byte_arr = io.BytesIO()
-                img.save(img_byte_arr, format='PNG')
-                img_byte_arr.seek(0)
-                
                 # Add to approved images list
-                approved_images.append((img, f"processed_image_{i+1}.png"))
+                approved_images.append((img, img_no_watermark, f"processed_image_{i+1}.png"))
         
         # Check if Google Drive functionality is available
         if is_gdrive_enabled():
-            # Create folder and upload images
-            folder_name = f"Approved_{session.supply_id}"
-            folder_id, folder_link = create_drive_folder(folder_name, parent_id=UPLOAD_FOLDER_ID)
+            # Create main folder
+            main_folder_name = f"Approved_{session.supply_id}"
+            main_folder_id, main_folder_link = create_drive_folder(main_folder_name, parent_id=UPLOAD_FOLDER_ID)
             
-            if folder_id:
-                # Upload all approved images
+            if main_folder_id:
+                # Create two subfolders
+                watermark_folder_id, _ = create_drive_folder("Watermarked", parent_id=main_folder_id)
+                no_watermark_folder_id, _ = create_drive_folder("No_Watermark", parent_id=main_folder_id)
+                
+                # Upload all approved images to both folders
                 upload_results = []
-                for img, filename in approved_images:
-                    # Convert to bytes
+                
+                for img, img_no_watermark, filename in approved_images:
+                    # Upload watermarked version
                     img_byte_arr = io.BytesIO()
                     img.save(img_byte_arr, format='PNG')
                     img_bytes = img_byte_arr.getvalue()
                     
-                    # Upload
-                    file_id, file_link = upload_to_google_drive(img_bytes, filename=filename, folder_id=folder_id)
+                    file_id, file_link = upload_to_google_drive(
+                        img_bytes, 
+                        filename=filename, 
+                        folder_id=watermark_folder_id
+                    )
+                    
+                    # Upload non-watermarked version
+                    img_byte_arr_no_wm = io.BytesIO()
+                    img_no_watermark.save(img_byte_arr_no_wm, format='PNG')
+                    img_bytes_no_wm = img_byte_arr_no_wm.getvalue()
+                    
+                    file_id_no_wm, _ = upload_to_google_drive(
+                        img_bytes_no_wm, 
+                        filename=filename, 
+                        folder_id=no_watermark_folder_id
+                    )
+                    
                     if file_id:
                         upload_results.append((filename, file_link))
                 
@@ -337,8 +529,8 @@ async def finalize_qc_process(interaction, session):
                 if upload_results:
                     await interaction.channel.send(
                         f"✅ QC Complete for Supply ID: {session.supply_id}\n"
-                        f"All {len(upload_results)} images passed QC and were uploaded to Google Drive.\n"
-                        f"📁 Folder Link: {folder_link}"
+                        f"📁 Folder Link: {main_folder_link}\n"
+                        f"Both watermarked and non-watermarked versions are available in separate subfolders."
                     )
                 else:
                     await interaction.channel.send(
@@ -346,47 +538,64 @@ async def finalize_qc_process(interaction, session):
                     )
             else:
                 await interaction.channel.send(
-                    f"❌ QC Complete for Supply ID: {session.supply_id}, but failed to create Google Drive folder."
+                    f"❌ QC Complete for Supply ID: {session.supply_id}, but failed to create Google Drive folders."
                 )
         else:
             # Google Drive functionality not available - save locally
-            # Create a directory to save passed images
+            # Create directories to save passed images
             local_dir = f"approved_images_{session.supply_id}"
-            os.makedirs(local_dir, exist_ok=True)
+            watermarked_dir = os.path.join(local_dir, "watermarked")
+            no_watermark_dir = os.path.join(local_dir, "no_watermark")
+            
+            os.makedirs(watermarked_dir, exist_ok=True)
+            os.makedirs(no_watermark_dir, exist_ok=True)
             
             # Save all approved images locally
             saved_count = 0
-            for i, (img, filename) in enumerate(approved_images):
+            for img, img_no_watermark, filename in approved_images:
                 try:
-                    filepath = os.path.join(local_dir, filename)
-                    img.save(filepath, format='PNG')
+                    # Save watermarked version
+                    filepath_wm = os.path.join(watermarked_dir, filename)
+                    img.save(filepath_wm, format='PNG')
+                    
+                    # Save non-watermarked version
+                    filepath_no_wm = os.path.join(no_watermark_dir, filename)
+                    img_no_watermark.save(filepath_no_wm, format='PNG')
+                    
                     saved_count += 1
                 except Exception as e:
                     print(f"Error saving image {filename}: {e}")
             
             await interaction.channel.send(
                 f"✅ QC Complete for Supply ID: {session.supply_id}\n"
-                f"All {passed_count} images passed QC.\n"
-                f"⚠️ Google Drive is not configured, so {saved_count} images were saved locally in folder: {local_dir}"
+                f"{passed_count} images passed QC.\n"
+                f"⚠️ Google Drive is not configured, so {saved_count} images were saved locally in folder: {local_dir}\n"
+                f"Both watermarked and non-watermarked versions are available in separate subfolders."
             )
-    else:
-        # Some images failed QC
-        await interaction.channel.send(
-            f"⚠️ QC Complete for Supply ID: {session.supply_id}\n"
-            f"Results: {passed_count} passed, {failed_count} failed.\n"
-            f"Please submit corrected images for the failed ones."
-        )
     
-    # Clean up the session
-    if session.message_id in active_sessions:
+    # Handle failed images
+    if failed_count > 0:
+        failed_indices = [i for i, status in enumerate(session.qc_status) if status is False]
+        failed_nums = [str(i+1) for i in failed_indices]
+        
+        if not session.all_passed():
+            await interaction.channel.send(
+                f"⚠️ QC Status for Supply ID: {session.supply_id}\n"
+                f"Results: {passed_count} passed, {failed_count} failed.\n"
+                f"Failed images: {', '.join(failed_nums)}\n"
+                f"Use the 'Retouch Again' button on the failed images to retry."
+            )
+    
+    # Clean up the session if all images passed
+    if session.all_passed() and session.message_id in active_sessions:
         del active_sessions[session.message_id]
-    
-    # Clean up the QC message
-    try:
-        await interaction.message.delete()
-    except Exception as e:
-        print(f"Error deleting message: {e}")
-        pass
+        
+        # Clean up the QC message
+        try:
+            await interaction.message.delete()
+        except Exception as e:
+            print(f"Error deleting message: {e}")
+            pass
 
 # --- Bot Setup ---
 intents = discord.Intents.default()
@@ -448,9 +657,12 @@ async def on_message(message):
                     
                     # Process the image
                     retouched_image = retouch_image(image)
-                    watermarked_image = add_watermark(retouched_image)
                     
-                    # Store processed image
+                    # Store processed image without watermark
+                    session.processed_images_no_watermark.append(retouched_image)
+                    
+                    # Add watermark and store
+                    watermarked_image = add_watermark(retouched_image)
                     session.processed_images.append(watermarked_image)
                     
                     # Initialize QC status as None (pending)
@@ -515,3 +727,4 @@ async def on_message(message):
 # --- Run the bot ---
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
+    
